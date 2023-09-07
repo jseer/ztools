@@ -1,0 +1,26 @@
+{
+  "name": "@ztools/utils",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "dev": "father dev",
+    "build": "father build"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "utils"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "esbuild": "^0.19.2",
+    "handlebars": "^4.7.8",
+    "picocolors": "^1.0.0",
+    "prompts": "^2.4.2",
+    "zod": "^3.22.2"
+  }
+}

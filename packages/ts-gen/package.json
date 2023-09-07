@@ -1,0 +1,29 @@
+{
+  "name": "@ztools/ts-gen",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "dev": "father dev",
+    "build": "father build"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "ts",
+    "generate"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@ztools/utils": "workspace:^",
+    "minimist": "^1.2.8",
+    "node-fetch": "^3.3.2",
+    "picocolors": "^1.0.0",
+    "prompts": "^2.4.2",
+    "ts-morph": "^19.0.0",
+    "zod": "^3.22.2"
+  }
+}
