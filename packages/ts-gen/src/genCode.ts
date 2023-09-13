@@ -5,10 +5,17 @@ import {
   CustomHttpRequestConfig,
   GlobalContext,
   ExtractNameItemWithDefined,
+  IdentifiersInfo,
+  ScopeEnum,
 } from "./types";
 import path from "path";
 import fsp from "fs/promises";
-import { getTsExtname, getTimestampFile, MODULE_SELF_KEY } from "./utils";
+import {
+  getDefaultFilename,
+  getFile,
+  MODULE_SELF_KEY,
+  getExtractNameChildPos,
+} from "./utils";
 import prompts from "prompts";
 import fs from "fs";
 import colors from "picocolors";
@@ -21,14 +28,16 @@ import {
 import { Project, ModuleDeclarationKind } from "ts-morph";
 import genInterfaceOrAlias from "./genInterfaceOrAlias";
 import printTips from "./printTips";
-import handleExtractNames from "./handleExtractNames";
+import handleExtractNames, {
+  handleRemainingExtractNames,
+} from "./handleExtractNames";
 
 export default async function genCode(config: ConfigOptions) {
   const globalContext: GlobalContext = {};
   const project = new Project();
   const { default: fetch, AbortError } = await import("node-fetch");
-  await Promise.allSettled(
-    Object.keys(config.modules).map(async (name) => {
+  await parallelLimit(
+    Object.keys(config.modules).map((name) => async () => {
       const logger = createLogger({
         tag: name,
       });
@@ -36,25 +45,32 @@ export default async function genCode(config: ConfigOptions) {
       const {
         output,
         items,
-        global: globalDeclare = true,
-        namespaceExport = true,
-        parallelLimit: maxParallelLimit = 3,
+        global: globalDeclare,
+        parallelLimit: maxParallelLimit,
         hidden,
-        extractNames: moduleExtractNames,
+        extractNames,
       } = m;
       if (hidden) {
         logger.warn(`module(${name}) has been hidden`);
         return;
       }
+      globalContext[name] = {
+        [MODULE_SELF_KEY]: {
+          errors: [],
+          warnings: [],
+          finished: false,
+        },
+      };
+      const context = globalContext[name];
       const cwd = process.cwd();
       let outputPath = "";
       if (output) {
         outputPath = path.resolve(
           output.dir ? output.dir : cwd,
-          output.filename ? output.filename : getTimestampFile(name)
+          output.filename ? output.filename : getDefaultFilename(name)
         );
       } else {
-        outputPath = path.resolve(cwd, getTimestampFile(name));
+        outputPath = path.resolve(cwd, getDefaultFilename(name));
       }
       let result: prompts.Answers<"overwrite"> = {
         overwrite: false,
@@ -85,54 +101,43 @@ export default async function genCode(config: ConfigOptions) {
         }
         if (!result.overwrite) {
           logger.warn("you choose not to force overwrite");
-          outputPath = path.resolve(
-            path.dirname(outputPath),
-            getTimestampFile(
-              path.basename(outputPath, getTsExtname(outputPath))
-            )
-          );
+          outputPath = getFile(outputPath);
           logger.warn(`file ${colors.dim(outputPath)} will be generated`);
         }
       }
       logger.info("outputPath =>", outputPath);
-
-      globalContext[name] = {
-        [MODULE_SELF_KEY]: {
-          errors: [],
-          warnings: [],
-        },
-      };
-      const context = globalContext[name];
+      const extractNamesMap = new Map<string, ExtractNameItemWithDefined>();
+      if (
+        extractNames &&
+        !handleExtractNames({
+          extractNames,
+          extractNamesMap,
+          context: context[MODULE_SELF_KEY],
+          fieldPath: (item) => {
+            return `extractNames${getExtractNameChildPos(item)}->name`;
+          },
+          scope: ScopeEnum.module,
+          moduleName: name,
+        })
+      ) {
+        return;
+      }
       if (items.length) {
+        logger.wait("processing");
         const sourceFile = project.createSourceFile(outputPath, "", {
           overwrite: result.overwrite,
         });
-        const moduleExtractNamesMap = new Map<string, ExtractNameItemWithDefined>();
-        if (
-          moduleExtractNames &&
-          !handleExtractNames({
-            extractNames: moduleExtractNames,
-            extractNamesMap: moduleExtractNamesMap,
-            rootName: "",
-            context: context[MODULE_SELF_KEY],
-            fieldPath: (i) => {
-              return `extractNames->[${i}]->name`;
-            },
-            handleType: "module",
-          })
-        ) {
-          return;
-        }
-        logger.wait("processing");
+        const identifiers = new Map<string, string>();
+        const identifiersInfoMap = new Map<string, IdentifiersInfo>();
         const namespaceArr: string[] = [];
+        let hasError = false;
         await parallelLimit(
           items.map((item, i) => async () => {
             const {
               request,
               tsConfig,
               namespace,
-              global: selfDeclare = true,
-              selfExport = true,
+              global: selfDeclare,
               hidden,
             } = item;
             const itemLogger = logger.child({ tag: namespace });
@@ -183,7 +188,7 @@ export default async function genCode(config: ConfigOptions) {
                   method = "get",
                   body,
                   headers,
-                  timeout = 30000,
+                  timeout,
                 } = request as HttRequestConfig;
                 const AbortController = globalThis.AbortController;
                 const controller = new AbortController();
@@ -235,7 +240,6 @@ export default async function genCode(config: ConfigOptions) {
                   });
                 } else {
                   await writeTplFile({
-                    override,
                     content: JSON.stringify(data),
                     outputPath: sPath,
                   });
@@ -244,7 +248,7 @@ export default async function genCode(config: ConfigOptions) {
               itemLogger.success("get data finished");
               if (!isPlainData) {
                 namespaceContext.errors.push({
-                  message: "request returned data must be an plain object",
+                  message: "dataSource(by request) must be an plain object",
                 });
                 return;
               }
@@ -254,9 +258,7 @@ export default async function genCode(config: ConfigOptions) {
               moduleDeclaration.setDeclarationKind(
                 ModuleDeclarationKind.Namespace
               );
-              if (selfExport && namespaceExport) {
-                moduleDeclaration.setIsExported(true);
-              }
+              moduleDeclaration.setIsExported(true);
               const moduleDeclare = selfDeclare && globalDeclare;
               if (moduleDeclare) {
                 moduleDeclaration.setHasDeclareKeyword(true);
@@ -266,31 +268,55 @@ export default async function genCode(config: ConfigOptions) {
                 errors: namespaceContext.errors,
                 logger: itemLogger,
                 rootDeclaration: moduleDeclaration,
-                tsConfig,
+                tsConfig: tsConfig!,
                 namespace,
                 selfDeclare: moduleDeclare,
-                moduleExtractNamesMap,
+                extractNamesMap,
                 sourceFile,
+                moduleName: name,
+                identifiers,
+                identifiersInfoMap,
               });
               namespaceContext.finished = true;
             } catch (e: any) {
               context[MODULE_SELF_KEY].errors.push({
-                message: `items[${i}] error: ${e.message}`,
+                message: `items[${i}] error: ${e.stack || e.message}`,
               });
+              hasError = true;
             }
           }),
           maxParallelLimit
         );
         logger.success("processed");
-        logger.wait("file emitting");
-        await sourceFile.save();
-        logger.success("file emit success");
+        if (hasError) {
+          logger.error("have unknown error, file not emit");
+        } else {
+          logger.wait("file emitting");
+          if (process.env.NODE_ENV !== "test") {
+            await sourceFile.save();
+          }
+          logger.success("file emit success");
+        }
+        handleRemainingExtractNames(
+          extractNamesMap,
+          context[MODULE_SELF_KEY],
+          ScopeEnum.module,
+          (item) => {
+            return `extractNames${getExtractNameChildPos(item)}->name(${
+              item.originName
+            }) not extract`;
+          }
+        );
       } else {
         context[MODULE_SELF_KEY].errors.push({
           message: "items is empty",
         });
       }
-    })
+    }),
+    config.parallelLimit,
+    {
+      throwInError: true,
+    }
   );
   console.log("\n");
   console.log(colors.dim("wait for print tips..."));
@@ -299,5 +325,6 @@ export default async function genCode(config: ConfigOptions) {
   console.log("\n");
   if (diagnostics.length) {
     console.log(project.formatDiagnosticsWithColorAndContext(diagnostics));
-  }
+  } 
+  return project;
 }

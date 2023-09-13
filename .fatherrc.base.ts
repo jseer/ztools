@@ -4,5 +4,4 @@ export default defineConfig({
   cjs: {
     output: 'dist',
   },
-  sourcemap: true,
 });

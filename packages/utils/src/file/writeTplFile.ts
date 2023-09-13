@@ -1,8 +1,9 @@
 import path from "path";
 import fsp from "fs/promises";
 import fs from "fs";
-import Handlebars from "handlebars";
+import Mustache from "mustache";
 import assert from "assert";
+import createDebugger from "../createDebugger";
 
 export interface WriteFileOptions {
   outputPath: string;
@@ -10,15 +11,16 @@ export interface WriteFileOptions {
   tpl?: string;
   tplPath?: string;
   context?: object;
-  override?: boolean;
 }
-
+const debug = createDebugger("utils:writeTplFile");
 async function write(outputPath: string, content: string) {
+  debug("write outputPath:%s ", outputPath);
   await fsp.mkdir(path.dirname(outputPath), { recursive: true });
   await fsp.writeFile(outputPath, content, "utf-8");
 }
 export default async function writeTplFile(options: WriteFileOptions) {
-  let { outputPath, content, tpl, tplPath, context, override } = options;
+  let { outputPath, content, tpl, tplPath, context } = options;
+  debug("outputPath:%s tplPath:%s", outputPath, tplPath);
   const savePath = path.isAbsolute(outputPath)
     ? outputPath
     : path.resolve(process.cwd(), outputPath);
@@ -28,13 +30,11 @@ export default async function writeTplFile(options: WriteFileOptions) {
         (fs.existsSync(tplPath) && (await fsp.stat(tplPath)).isFile()),
       `tplPath does not exists or is not a file.`
     );
-    assert(tpl, `tpl or .plPath must be supplied.`);
     tpl = tplPath ? await fsp.readFile(tplPath, "utf-8") : tpl;
-    content = Handlebars.compile(tpl)(context);
+    assert(tpl, `tpl or .tplPath must be supplied.`);
+    content = Mustache.render(tpl, context);
   }
-  if (override) {
-    await write(savePath, content);
-  } else if (!fs.existsSync(savePath)) {
+  if (!fs.existsSync(savePath)) {
     await write(savePath, content);
   } else {
     const stats = await fsp.stat(savePath);

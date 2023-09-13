@@ -7,13 +7,15 @@
   "scripts": {
     "dev": "pnpm run -r dev",
     "build": "pnpm run -r build",
-    "test": "jest"
+    "test": "NODE_ENV=test jest"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/debug": "^4.1.8",
     "@types/jest": "^29.5.4",
+    "@types/mustache": "^4.2.2",
     "@types/node": "^20.5.9",
     "father": "^4.3.1",
     "jest": "^29.6.4",

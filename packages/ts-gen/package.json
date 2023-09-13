@@ -6,6 +6,9 @@
     "dev": "father dev",
     "build": "father build"
   },
+  "bin": {
+    "ts-gen": "./bin/ts-gen.js"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

@@ -1,30 +1,26 @@
 import minimist from "minimist";
-import { loadConfigFromFile, formatZError } from "@ztools/utils";
-import genCode from "./genCode";
-import { configSchema, ConfigOptions } from "./types";
+import { createLogger, writeTplFile } from "@ztools/utils";
+import path from "path";
+import handler from "./handler";
 
-const argv = minimist<{
-  c?: string;
-  config?: string;
-}>(process.argv.slice(2), { string: ["_"] });
-
-async function start() {
-  let userConfig = await loadConfigFromFile<ConfigOptions>({
-    configFile: argv.config || argv.c,
-    defaultConfigFiles: [
-      ".z-ts-genrc.ts",
-      ".z-ts-genrc.js",
-      ".z-ts-gen.config.ts",
-      ".z-ts-gen.config.js",
-    ],
+const logger = createLogger({ tag: "ts-gen" });
+export async function start() {
+  const argv = minimist(process.argv.slice(2), {
+    string: ["_"],
+    alias: {
+      c: "config",
+    },
   });
-  let result = configSchema.safeParse(userConfig);
-  if (result.success) {
-    userConfig = result.data;
+  if (argv._[0] === "init") {
+    await writeTplFile({
+      outputPath: `.ts-gen.config.ts`,
+      tplPath: path.resolve(__filename, "../tpl/ts-gen.config.tpl"),
+      context: {
+        defineConfigPath: path.resolve(__dirname, "defineConfig"),
+      },
+    });
+    logger.success("file(.ts-gen.config.ts) written");
   } else {
-    throw new Error(formatZError(result.error))
+    await handler({ config: argv.config });
   }
-  await genCode(userConfig);
 }
-
-start();

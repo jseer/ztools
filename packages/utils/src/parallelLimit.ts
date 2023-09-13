@@ -1,6 +1,6 @@
 export default async function parallelLimit(
   tasks: { (i?: number): Promise<any> }[],
-  limit: number,
+  limit: number = tasks.length,
   options?: {
     throwInError: boolean;
   }

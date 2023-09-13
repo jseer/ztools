@@ -5,7 +5,7 @@ import {
   LoggerOptions,
   Logger,
   loggerOptionsSchema,
-} from "./schema/loggerSchema";
+} from "./loggerSchema";
 import { z } from "zod";
 
 export const prefixes = {
@@ -112,7 +112,10 @@ export default function createLogger(
   handleEnable(enable);
   function isEnable(level: LogLevel) {
     return (
-      enabled && tagEnabled && (enableLevels ? enableLevels.has(level) : true)
+      !process.env.LOGGER_DISABLE &&
+      enabled &&
+      tagEnabled &&
+      (enableLevels ? enableLevels.has(level) : true)
     );
   }
   function output(level: LogLevel, message: any[]) {

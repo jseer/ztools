@@ -4,7 +4,13 @@ import {
   TypeAliasDeclaration,
   InterfaceDeclaration,
 } from "ts-morph";
-import { GenContext, ExtractNameItemWithDefined } from "./types";
+import {
+  DefineScope,
+  ExtractNameItemWithDefined,
+  GenContext,
+  IdentifiersInfo,
+  ScopeEnum,
+} from "./types";
 import colors from "picocolors";
 import {
   ARRAY_ITEM_LINK_NAME,
@@ -14,8 +20,12 @@ import {
   transformPropertyName,
   getTsTypeByValue,
   reg,
+  proxyIdentifiersTarget,
+  getExtractNameChildPos,
 } from "./utils";
-import handleExtractNames from "./handleExtractNames";
+import handleExtractNames, {
+  handleRemainingExtractNames,
+} from "./handleExtractNames";
 
 enum typeEnum {
   array = "array",
@@ -27,11 +37,6 @@ enum typeEnum {
   null = "null",
 }
 
-interface InfoMap {
-  links: Set<string>;
-  declaration: TypeAliasDeclaration | InterfaceDeclaration;
-}
-
 export default function genInterfaceOrAlias(data: any, context: GenContext) {
   context.logger.wait("processing");
   let {
@@ -39,10 +44,14 @@ export default function genInterfaceOrAlias(data: any, context: GenContext) {
     tsConfig: { rootName, extractNames },
     selfDeclare,
     sourceFile,
-    moduleExtractNamesMap,
+    moduleName,
+    extractNamesMap: parentExtractNamesMap,
+    identifiers: parentIdentifiers,
+    identifiersInfoMap: parentIdentifiersInfoMap,
+    namespace,
   } = context;
-  rootName = upperFirst(rootName);
-  const extractNamesMap = new Map<string, ExtractNameItemWithDefined>();
+  rootName = upperFirst(rootName!);
+  const extractNamesMap = new Map(parentExtractNamesMap.entries());
   if (
     extractNames &&
     !handleExtractNames({
@@ -50,30 +59,74 @@ export default function genInterfaceOrAlias(data: any, context: GenContext) {
       extractNamesMap,
       rootName,
       context,
-      fieldPath: (i) => {
-        return `tsConfig->extractNames[${i}]->name`;
+      fieldPath: (item) => {
+        return `tsConfig->extractNames${getExtractNameChildPos(
+          item
+        )}->name`;
       },
-      handleType: "namespace",
+      scope: ScopeEnum.namespace,
+      moduleName,
+      namespace,
     })
   ) {
     return;
   }
-  const identifiers = new Map<string, string>();
-  const identifiersInfoMap = new Map<string, InfoMap>();
   const propertyQueue: string[] = [];
+  propertyQueue.push(moduleName, namespace);
+  let currentLinkName = propertyQueue.join(LINK_PATH_SEP);
+  const defaultLinkName = getLinkName();
+  const defineScope: DefineScope = {
+    linkName: defaultLinkName,
+    scope: ScopeEnum.namespace,
+  };
+  const extractNamesScopeQueue: { linkName: string; scope: ScopeEnum }[] = [
+    { linkName: moduleName, scope: ScopeEnum.module },
+    Object.assign({}, defineScope),
+  ];
+  const identifiers = proxyIdentifiersTarget<string>(
+    new Map<string, string>(),
+    {
+      defineScope,
+      parentIdentifiers,
+    }
+  );
+  const identifiersInfoMap = proxyIdentifiersTarget<IdentifiersInfo>(
+    new Map<string, IdentifiersInfo>(),
+    {
+      defineScope,
+      parentIdentifiers: parentIdentifiersInfoMap,
+    }
+  );
+  const scopeDeclaration = {
+    [ScopeEnum.module]: sourceFile,
+    [ScopeEnum.namespace]: rootDeclaration,
+  };
 
   function getLinkName() {
     return propertyQueue.join(LINK_PATH_SEP);
   }
 
+  function getLinkNameDefine() {
+    if (defineScope.scope === ScopeEnum.namespace) {
+      return propertyQueue.slice(2).join(LINK_PATH_SEP);
+    } else if (defineScope.scope === ScopeEnum.module) {
+      return propertyQueue.slice(1).join(LINK_PATH_SEP);
+    } else {
+      const name = getLinkName();
+      context.errors.push({
+        message: `never linkName(${name})`,
+      });
+      return name; // never;
+    }
+  }
+
   function getExtractNameItem(name: string) {
-    const curLinkName = getLinkName();
-    return extractNamesMap.get(curLinkName + LINK_PATH_SEP + name);
+    return extractNamesMap.get(currentLinkName + LINK_PATH_SEP + name);
   }
 
   function getUniqueIdentifier(extractName: string, i: number = 1): string {
     const rewriteExtractName = extractName + i++;
-    if (identifiersInfoMap.has(rewriteExtractName)) {
+    if (hasIdentifier(rewriteExtractName)) {
       return getUniqueIdentifier(extractName, i);
     }
     return rewriteExtractName;
@@ -97,113 +150,192 @@ export default function genInterfaceOrAlias(data: any, context: GenContext) {
     return upperFirst(name);
   }
 
-  function getNameByExportItem(linkName: string) {
+  function setDefineScope() {
+    const last = extractNamesScopeQueue[extractNamesScopeQueue.length - 1];
+    defineScope.linkName = last.linkName;
+    defineScope.scope = last.scope;
+  }
+
+  function enter(name: string) {
+    propertyQueue.push(name);
+    currentLinkName = getLinkName();
+    const extractNameItem = extractNamesMap.get(currentLinkName);
+    if (extractNameItem) {
+      extractNamesScopeQueue.push({
+        linkName: currentLinkName,
+        scope: extractNameItem.scope,
+      });
+      setDefineScope();
+    }
+  }
+
+  function leave() {
+    if (
+      defineScope.linkName === currentLinkName &&
+      extractNamesScopeQueue.length > 1
+    ) {
+      extractNamesScopeQueue.pop();
+      setDefineScope();
+    }
+    propertyQueue.pop();
+    currentLinkName = getLinkName();
+  }
+
+  function hasIdentifier(name: string) {
+    return (
+      (defineScope.scope === ScopeEnum.module &&
+        parentIdentifiersInfoMap.has(name)) ||
+      (defineScope.scope === ScopeEnum.namespace &&
+        identifiersInfoMap.has(name))
+    );
+  }
+
+  function getExportItem(linkName: string) {
     const extractItem = extractNamesMap.get(linkName);
     if (extractItem) {
       if (extractItem.defined) {
-        return extractItem.defined;
-      }
-      if (identifiersInfoMap.has(extractItem.name)) {
+        return extractItem;
+      } else if (hasIdentifier(extractItem.name)) {
         extractItem.defined = getUniqueIdentifier(extractItem.name);
         context.warnings.push({
-          message: `items->tsConfig->extractNames->name ${colors.dim(
-            extractItem.name
-          )} has been declared, rewrite as ${extractItem.defined}`,
+          message: `tsConfig->extractNames->name(${extractItem.name}) has been declared, rewrite as ${extractItem.defined}`,
         });
-        return extractItem.defined;
+        return extractItem;
       } else {
         extractItem.defined = extractItem.name;
-        return extractItem.defined;
+        return extractItem;
       }
     }
+  }
+
+  function getPreScope() {
+    return extractNamesScopeQueue[extractNamesScopeQueue.length - 2];
+  }
+
+  function getTypeWithNamespace(
+    type: string,
+    extractItem?: ExtractNameItemWithDefined
+  ) {
+    return getPreScope().scope === ScopeEnum.module &&
+      extractItem &&
+      extractItem.scope === ScopeEnum.namespace
+      ? namespace + "." + type
+      : type;
   }
 
   function getNameByExtractName() {
-    let linkName = getLinkName();
-    let name = linkName;
-    let extractName = getNameByExportItem(linkName);
-    name = extractName ? extractName : name;
-    if (extractName) {
-      return { name: extractName, linkName };
+    let extractItem = getExportItem(currentLinkName);
+    if (extractItem) {
+      return {
+        name: extractItem.defined!,
+        linkName: currentLinkName,
+        extractItem,
+      };
     }
-    return { name: transformIdentifier(name), linkName };
+    return {
+      name: transformIdentifier(getLinkNameDefine()),
+      linkName: currentLinkName,
+    };
   }
 
-  function getAliasFromArrayWithExtractName(
-    name: string,
-    data: any,
-    isExport?: boolean
-  ) {
-    const literal = getTypeFromArray(name, data);
-    const result = addTypeAlias(name, literal, isExport);
-    return result.aliasName;
+  function getAliasFromArray(name: string, data: any, isExport?: boolean) {
+    enter(name);
+    const literal = getLiteralFromArray(name, data);
+    const { aliasDeclaration, aliasName, extractItem } = addTypeAlias(
+      name,
+      literal,
+      isExport
+    );
+    const result = {
+      aliasDeclaration,
+      aliasName: getTypeWithNamespace(aliasName, extractItem),
+    };
+    leave();
+    return result;
   }
+
+  function getAliasFromNormal(name: string, type: string, isExport?: boolean) {
+    enter(name);
+    const { aliasDeclaration, aliasName, extractItem } = addTypeAlias(
+      name,
+      type,
+      isExport
+    );
+    const result = {
+      aliasDeclaration,
+      aliasName: getTypeWithNamespace(aliasName, extractItem),
+    };
+    leave();
+    return result;
+  }
+
   function getTypeFromObject(name: string, data: any): WriterFunction {
-    propertyQueue.push(name);
+    enter(name);
     const writerFunction = Writers.objectType({
       properties: Object.keys(data).map((key: string) => {
         let type: string | WriterFunction = getTsTypeByValue(data[key]);
+        const extractNameItem = getExtractNameItem(key);
         if (type === typeEnum.object) {
-          const extractNameItem = getExtractNameItem(key);
           if (extractNameItem) {
-            type = getInterfaceFromObject(
-              key,
-              data[key],
-              extractNameItem.selfExport
-            ).interfaceName;
+            type = getInterfaceFromObject(key, data[key]).interfaceName;
           } else {
             type = getTypeFromObject(key, data[key]);
           }
         } else if (type === typeEnum.array) {
-          const extractNameItem = getExtractNameItem(key);
           if (extractNameItem) {
-            type = getAliasFromArrayWithExtractName(
-              key,
-              data[key],
-              extractNameItem.selfExport
-            );
+            type = getAliasFromArray(key, data[key]).aliasName;
           } else {
             type = getTypeFromArray(key, data[key]);
           }
+        } else {
+          if (extractNameItem) {
+            type = getAliasFromNormal(key, type).aliasName;
+          }
         }
+
         return {
           name: transformPropertyName(key),
           type,
         };
       }),
     });
-    propertyQueue.pop();
+    leave();
     return writerFunction;
   }
 
-  function getTypeFromArray(key: string, arr: any[]) {
-    propertyQueue.push(key);
+  function getLiteralFromArray(key: string, arr: any[]) {
     const fArr = arr.filter((item) => item !== null);
     const item = fArr[0];
-    let result;
+    let result = "[]";
     if (item) {
       const type = getTsTypeByValue(item);
       if (type === typeEnum.array) {
-        result =
-          getAliasFromArrayWithExtractName(
-            ARRAY_ITEM_LINK_NAME,
-            item,
-            getExtractNameItem(ARRAY_ITEM_LINK_NAME)?.selfExport
-          ) + "[]";
+        if (getExtractNameItem(ARRAY_ITEM_LINK_NAME)) {
+          result = getAliasFromArray(ARRAY_ITEM_LINK_NAME, item) + "[]";
+        } else {
+          result = getTypeFromArray(ARRAY_ITEM_LINK_NAME, item) + "[]";
+        }
       } else if (type === typeEnum.object) {
         result =
-          getInterfaceFromObject(
-            ARRAY_ITEM_LINK_NAME,
-            item,
-            getExtractNameItem(ARRAY_ITEM_LINK_NAME)?.selfExport
-          ).interfaceName + "[]";
+          getInterfaceFromObject(ARRAY_ITEM_LINK_NAME, item).interfaceName +
+          "[]";
       } else {
-        result = type + "[]";
+        if (getExtractNameItem(ARRAY_ITEM_LINK_NAME)) {
+          return (
+            getAliasFromNormal(ARRAY_ITEM_LINK_NAME, type).aliasName + "[]"
+          );
+        } else {
+          result = type + "[]";
+        }
       }
-    } else {
-      result = "any[]";
     }
-    propertyQueue.pop();
+    return result;
+  }
+
+  function getTypeFromArray(key: string, arr: any[]) {
+    enter(key);
+    const result = getLiteralFromArray(key, arr);
+    leave();
     return result;
   }
 
@@ -213,12 +345,12 @@ export default function genInterfaceOrAlias(data: any, context: GenContext) {
     declaration: TypeAliasDeclaration | InterfaceDeclaration
   ) {
     identifiers.set(linkName, name);
-    let infoMap: InfoMap;
+    let infoMap: IdentifiersInfo;
     if (identifiersInfoMap.has(name)) {
       infoMap = identifiersInfoMap.get(name)!;
     } else {
-      infoMap = {} as InfoMap;
-      identifiersInfoMap.set(name, infoMap as InfoMap);
+      infoMap = {} as IdentifiersInfo;
+      identifiersInfoMap.set(name, infoMap);
     }
     infoMap.declaration = declaration;
     if (!infoMap.links) {
@@ -227,69 +359,79 @@ export default function genInterfaceOrAlias(data: any, context: GenContext) {
     infoMap.links.add(linkName);
   }
 
-  function addTypeAlias(
-    name: string,
-    type: string | WriterFunction,
-    isExport?: boolean
-  ) {
-    propertyQueue.push(name);
-    const { name: aliasName, linkName } = getNameByExtractName();
+  function addTypeAlias(name: string, literal: string, isExport?: boolean) {
+    const { name: aliasName, linkName, extractItem } = getNameByExtractName();
     let result: {
       aliasName: string;
       aliasDeclaration: TypeAliasDeclaration;
       end?: boolean;
+      extractItem?: ExtractNameItemWithDefined;
     };
-    if (identifiersInfoMap.has(aliasName)) {
+    const identifierInfoItem = identifiersInfoMap.get(aliasName);
+    if (identifierInfoItem) {
       result = {
-        aliasDeclaration: identifiersInfoMap.get(aliasName)
-          ?.declaration as TypeAliasDeclaration,
+        aliasDeclaration:
+          identifierInfoItem.declaration as TypeAliasDeclaration,
         aliasName,
         end: true,
+        extractItem,
       };
     } else {
-      const aliasDeclaration = rootDeclaration.addTypeAlias({
-        name: aliasName,
-        type,
-      });
-      if (isExport && !selfDeclare) {
+      const aliasDeclaration = scopeDeclaration[defineScope.scope].addTypeAlias(
+        {
+          name: aliasName,
+          type: literal,
+        }
+      );
+      if (isExport || extractItem) {
         aliasDeclaration.setIsExported(true);
       }
-      result = { aliasDeclaration, aliasName };
+      result = { aliasDeclaration, aliasName, extractItem };
     }
-    propertyQueue.pop();
-    setIdentifier(aliasName, linkName, result.aliasDeclaration!);
+    setIdentifier(aliasName, linkName, result.aliasDeclaration);
     return result;
   }
+
   function addInterface(isExport?: boolean) {
-    const { name: interfaceName, linkName } = getNameByExtractName();
+    const {
+      name: interfaceName,
+      linkName,
+      extractItem,
+    } = getNameByExtractName();
     let result: {
       interfaceName: string;
       interfaceDeclaration: InterfaceDeclaration;
       end?: boolean;
+      extractItem?: ExtractNameItemWithDefined;
     };
-    if (identifiersInfoMap.has(interfaceName)) {
+    const identifierInfoItem = identifiersInfoMap.get(interfaceName);
+    if (identifierInfoItem) {
       result = {
-        interfaceDeclaration: identifiersInfoMap.get(interfaceName)
-          ?.declaration as InterfaceDeclaration,
+        interfaceDeclaration:
+          identifierInfoItem.declaration as InterfaceDeclaration,
         interfaceName,
         end: true,
+        extractItem,
       };
     } else {
-      const interfaceDeclaration = rootDeclaration.addInterface({
+      const interfaceDeclaration = scopeDeclaration[
+        defineScope.scope
+      ].addInterface({
         name: interfaceName,
       });
-      if (isExport && !selfDeclare) {
+      if (isExport || extractItem) {
         interfaceDeclaration.setIsExported(true);
       }
-      result = { interfaceDeclaration, interfaceName };
+      result = { interfaceDeclaration, interfaceName, extractItem };
     }
-    setIdentifier(interfaceName, linkName, result.interfaceDeclaration!);
+    setIdentifier(interfaceName, linkName, result.interfaceDeclaration);
     return result;
   }
 
   function getInterfaceFromObject(name: string, data: any, isExport?: boolean) {
-    propertyQueue.push(name);
-    const { interfaceDeclaration, interfaceName, end } = addInterface(isExport);
+    enter(name);
+    const { interfaceDeclaration, interfaceName, end, extractItem } =
+      addInterface(isExport);
     if (!end) {
       for (let key in data) {
         const type = getTsTypeByValue(data[key]);
@@ -298,11 +440,7 @@ export default function genInterfaceOrAlias(data: any, context: GenContext) {
           if (extractNameItem) {
             interfaceDeclaration.addProperty({
               name: transformPropertyName(key),
-              type: getAliasFromArrayWithExtractName(
-                key,
-                data[key],
-                extractNameItem.selfExport
-              ),
+              type: getAliasFromArray(key, data[key]).aliasName,
             });
             continue;
           }
@@ -317,11 +455,7 @@ export default function genInterfaceOrAlias(data: any, context: GenContext) {
           if (extractNameItem) {
             interfaceDeclaration.addProperty({
               name: transformPropertyName(key),
-              type: getInterfaceFromObject(
-                key,
-                data[key],
-                extractNameItem.selfExport
-              ).interfaceName,
+              type: getInterfaceFromObject(key, data[key]).interfaceName,
             });
             continue;
           }
@@ -331,32 +465,45 @@ export default function genInterfaceOrAlias(data: any, context: GenContext) {
           });
           continue;
         }
-        interfaceDeclaration.addProperty({
-          type,
-          name: transformPropertyName(key),
-        });
+        const extractNameItem = getExtractNameItem(key);
+        if (extractNameItem) {
+          interfaceDeclaration.addProperty({
+            name: transformPropertyName(key),
+            type: getAliasFromNormal(key, type).aliasName,
+          });
+        } else {
+          interfaceDeclaration.addProperty({
+            type,
+            name: transformPropertyName(key),
+          });
+        }
       }
     }
-    propertyQueue.pop();
-    return { interfaceDeclaration, interfaceName };
+    const result = {
+      interfaceDeclaration,
+      interfaceName: getTypeWithNamespace(interfaceName, extractItem),
+    };
+    leave();
+    return result;
   }
 
-  function getAliasFromArray(
-    rootName: string,
-    data: any[],
-    isExport?: boolean
-  ) {
-    return addTypeAlias(rootName, getTypeFromArray(rootName, data), isExport);
-  }
-
-  if (typeof data === "object") {
+  const type = getTsTypeByValue(data);
+  if (type === typeEnum.object) {
     getInterfaceFromObject(rootName, data, true);
-  } else if (Array.isArray(data)) {
+  } else if (type === typeEnum.array) {
     getAliasFromArray(rootName, data, true);
   } else {
-    context.warnings.push({
-      message: `data not an object or array, missing`,
-    });
+    getAliasFromNormal(rootName, data, true);
   }
+  handleRemainingExtractNames(
+    extractNamesMap,
+    context,
+    ScopeEnum.namespace,
+    (item) => {
+      return `tsConfig->extractNames${getExtractNameChildPos(item)}->name(${
+        item.originName
+      }) not extract`;
+    }
+  );
   context.logger.info("processed");
 }
